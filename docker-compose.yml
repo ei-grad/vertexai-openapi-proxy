@@ -1,0 +1,40 @@
+services:
+  proxy:
+    build: .
+    environment:
+      - VERTEXAI_PROJECT=${VERTEXAI_PROJECT}
+      - VERTEXAI_LOCATION=${VERTEXAI_LOCATION}
+      # Point to the mounted ADC file inside the container
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/gcp_adc.json
+      # Optional: Comma-separated list of models. See .env.example or README.md for details.
+      # - VERTEXAI_AVAILABLE_MODELS=${VERTEXAI_AVAILABLE_MODELS}
+    volumes:
+      # Mount the ADC file from your host to the container
+      # IMPORTANT: Replace ~/.config/gcloud/application_default_credentials.json
+      # with the actual path to your ADC file if it's different.
+      - ~/.config/gcloud/application_default_credentials.json:/app/gcp_adc.json:ro
+    restart: unless-stopped
+    #healthcheck:
+    #  test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/v1/models"] # A simple check, adjust path if needed
+    #  interval: 30s
+    #  timeout: 10s
+    #  retries: 3
+
+  webui:
+    image: ghcr.io/open-webui/open-webui:main
+    ports:
+      - "127.0.0.1:8080:8080" # Map host port 3000 to Open WebUI's container port 8080
+    environment:
+      OPENAI_API_BASE_URL: http://proxy:8080/v1
+      OPENAI_API_KEY: dummy_key_for_vertex_proxy
+      RAG_EMBEDDING_ENGINE: openai
+      RAG_EMBEDDING_MODEL: "none"
+    volumes:
+      - webui-data:/app/backend/data
+    #depends_on:
+    #  proxy:
+    #    condition: service_healthy # Wait for proxy to be healthy
+    restart: unless-stopped
+
+volumes:
+  webui-data:
