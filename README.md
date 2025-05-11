@@ -89,7 +89,9 @@ The proxy service is configured via environment variables:
     *   Supported values: `text` (human-readable), `json` (structured).
     *   Defaults to `text` if not set or invalid.
 
-The proxy listens on port `8080` within its container.
+*   `PORT`: (Optional) Sets the listening port for the proxy server.
+    *   Defaults to `8080` if not specified.
+
 
 ### Open WebUI Service (`docker-compose.yml`)
 

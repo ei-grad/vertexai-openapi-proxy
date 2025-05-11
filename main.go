@@ -12,7 +12,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"log/slog" // New import
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -340,7 +340,13 @@ func main() {
 	http.HandleFunc("/v1/models", handleModels)
 	http.Handle("/v1/", makeProxy(target))
 
-	addr := ":8080"
+	// Get port from environment variable, default to 8080
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	addr := ":" + port
+
 	logger.Info("proxy listening", "address", addr)
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatalf("main: ListenAndServe failed: %v", err)
