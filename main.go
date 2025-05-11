@@ -175,8 +175,8 @@ func makeProxy(target *url.URL) *httputil.ReverseProxy {
 						req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 						req.ContentLength = int64(len(bodyBytes))
 					} else {
-						// Body read successfully. Pass it through without modification.
-						logger.Debug("makeProxy Director: Passing original request body", "path", originalPath, "content_length", len(bodyBytes))
+						// Body read successfully. Log the body before passing it through.
+						logger.Debug("makeProxy Director: Outgoing request body", "path", originalPath, "body", string(bodyBytes))
 						req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 						req.ContentLength = int64(len(bodyBytes))
 					}
