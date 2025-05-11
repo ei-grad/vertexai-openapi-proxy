@@ -75,7 +75,7 @@ The Go application includes unit tests.
 The proxy service is configured via environment variables:
 
 *   `VERTEXAI_PROJECT`: (Required) Your Google Cloud Project ID.
-*   `VERTEXAI_LOCATION`: (Required) The Google Cloud region for Vertex AI (e.g., `us-central1`).
+*   `VERTEXAI_LOCATION`: (Required) The Google Cloud region for Vertex AI (e.g., `us-central1`) or `global` for the global endpoint.
 *   `GOOGLE_APPLICATION_CREDENTIALS`: (Set within `docker-compose.yml`) Points to the path of the mounted ADC JSON file inside the container (e.g., `/app/gcp_adc.json`).
 *   `VERTEXAI_AVAILABLE_MODELS`: (Optional) A comma-separated list of model IDs to serve via the `/v1/models` endpoint.
     *   Example: `VERTEXAI_AVAILABLE_MODELS="google/gemini-1.0-pro,google/gemini-1.5-flash-preview-0514"`

@@ -324,13 +324,22 @@ func main() {
 		log.Fatal("VERTEXAI_LOCATION and VERTEXAI_PROJECT env vars must be set")
 	}
 
-	// Construct the target URL for the general proxy.
-	// It uses the same host structure as the models API.
-	proxyHost := fmt.Sprintf(vertexAIAPIHostFormat, location)
-	baseURL := fmt.Sprintf(
-		"https://%s/v1/projects/%s/locations/%s/endpoints/openapi",
-		proxyHost, projectID, location,
-	)
+	var baseURL string
+	if location == "global" {
+		// Use the global endpoint format
+		baseURL = fmt.Sprintf(
+			"https://aiplatform.googleapis.com/v1/projects/%s/locations/global/endpoints/openapi",
+			projectID,
+		)
+	} else {
+		// Construct the target URL for regional endpoints
+		proxyHost := fmt.Sprintf(vertexAIAPIHostFormat, location)
+		baseURL = fmt.Sprintf(
+			"https://%s/v1/projects/%s/locations/%s/endpoints/openapi",
+			proxyHost, projectID, location,
+		)
+	}
+
 	target, err := url.Parse(baseURL)
 	if err != nil {
 		log.Fatalf("main: Error parsing target baseURL '%s': %v", baseURL, err)
