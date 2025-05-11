@@ -47,9 +47,19 @@ func initSlogLogger() {
 	opts := &slog.HandlerOptions{
 		Level: logLevel,
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			// Customize time format if needed, or other attributes
+			// Only replace top-level attributes
+			if groups != nil {
+				return a
+			}
 			if a.Key == slog.TimeKey {
 				a.Value = slog.StringValue(a.Value.Time().Format(time.RFC3339Nano))
+			} else if a.Key == slog.MessageKey {
+				a.Key = "message"
+			} else if a.Key == slog.SourceKey {
+				a.Key = "logging.googleapis.com/sourceLocation"
+			} else if a.Key == slog.LevelKey {
+				level := a.Value.Any().(slog.Level)
+				a = slog.String("severity", level.String())
 			}
 			return a
 		},
