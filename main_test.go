@@ -15,6 +15,20 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
+// This function will be run before any other tests in this package
+func TestMain(m *testing.M) {
+	// Setup: Initialize the logger
+	initSlogLogger()
+
+	// Run all tests
+	exitCode := m.Run()
+
+	// Teardown (if any needed)
+
+	// Exit with the tests' exit code
+	os.Exit(exitCode)
+}
+
 // MockTokenSource is a mock for google.Credentials.TokenSource
 type MockTokenSource struct {
 	AccessTokenString string

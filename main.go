@@ -12,12 +12,76 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/oauth2/google"
 )
+
+var logger *slog.Logger
+
+func initSlogLogger() {
+	var logLevel slog.Level
+	logLevelStr := strings.ToLower(os.Getenv("LOG_LEVEL"))
+	switch logLevelStr {
+	case "debug":
+		logLevel = slog.LevelDebug
+	case "info":
+		logLevel = slog.LevelInfo
+	case "warn":
+		logLevel = slog.LevelWarn
+	case "error":
+		logLevel = slog.LevelError
+	default:
+		logLevel = slog.LevelInfo // Default
+		if logLevelStr != "" && logLevelStr != "info" {
+			// Use standard log here as slog isn't fully set up
+			log.Printf("Warning: Invalid LOG_LEVEL '%s', defaulting to 'info'. Valid levels: debug, info, warn, error.", logLevelStr)
+		}
+	}
+
+	var handler slog.Handler
+	logFormatStr := strings.ToLower(os.Getenv("LOG_FORMAT"))
+	opts := &slog.HandlerOptions{
+		Level: logLevel,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			// Only replace top-level attributes
+			if groups != nil {
+				return a
+			}
+			if a.Key == slog.TimeKey {
+				a.Value = slog.StringValue(a.Value.Time().Format(time.RFC3339Nano))
+			} else if a.Key == slog.MessageKey {
+				a.Key = "message"
+			} else if a.Key == slog.SourceKey {
+				a.Key = "logging.googleapis.com/sourceLocation"
+			} else if a.Key == slog.LevelKey {
+				level := a.Value.Any().(slog.Level)
+				a = slog.String("severity", level.String())
+			}
+			return a
+		},
+	}
+
+	if logFormatStr == "json" {
+		handler = slog.NewJSONHandler(os.Stdout, opts)
+	} else {
+		handler = slog.NewTextHandler(os.Stdout, opts) // Default
+		 if logFormatStr != "" && logFormatStr != "text" {
+			log.Printf("Warning: Invalid LOG_FORMAT '%s', defaulting to 'text'. Valid formats: text, json.", logFormatStr)
+		}
+	}
+
+	logger = slog.New(handler)
+
+	// Redirect standard log package to slog
+	// All standard log calls will go to slog at Info level
+	slogBridge := slog.NewLogLogger(handler, slog.LevelInfo)
+	log.SetOutput(slogBridge.Writer())
+	log.SetFlags(0) // Disable standard log prefixes as slog handles formatting
+}
 
 // googleFindDefaultCredentialsWrapper wraps google.FindDefaultCredentials to allow mocking in tests.
 var googleFindDefaultCredentials = google.FindDefaultCredentials
@@ -54,7 +118,7 @@ var (
 func getToken(ctx context.Context) (string, error) {
 	tokenMutex.RLock()
 	if time.Now().Before(expiry.Add(-time.Minute)) { // cached token still valid
-		log.Println("getToken: Using cached token.")
+		logger.Debug("getToken: Using cached token.")
 		defer tokenMutex.RUnlock()
 		return token, nil
 	}
@@ -62,22 +126,22 @@ func getToken(ctx context.Context) (string, error) {
 
 	tokenMutex.Lock()
 	defer tokenMutex.Unlock()
-	log.Println("getToken: Cache expired or empty, fetching new token.")
+	logger.Info("getToken: Cache expired or empty, fetching new token.")
 
 	// Use the wrapper variable so it can be mocked in tests
 	creds, err := googleFindDefaultCredentials(ctx, "https://www.googleapis.com/auth/cloud-platform")
 	if err != nil {
-		log.Printf("getToken: Error finding default credentials: %v", err)
+		logger.Error("getToken: Error finding default credentials", "error", err)
 		return "", err
 	}
 	tok, err := creds.TokenSource.Token()
 	if err != nil {
-		log.Printf("getToken: Error getting token from source: %v", err)
+		logger.Error("getToken: Error getting token from source", "error", err)
 		return "", err
 	}
 	token = tok.AccessToken
 	expiry = tok.Expiry
-	log.Println("getToken: Successfully fetched new token.")
+	logger.Info("getToken: Successfully fetched new token.")
 	return token, nil
 }
 
@@ -86,14 +150,14 @@ func makeProxy(target *url.URL) *httputil.ReverseProxy {
 		Director: func(req *http.Request) {
 			// Log basic request info. Avoid logging full headers here to prevent excessive log volume.
 			// Specific headers like Authorization are logged when set.
-			log.Printf("makeProxy Director: Processing %s %s from %s", req.Method, req.URL.Path, req.RemoteAddr)
+			logger.Debug("makeProxy Director: Processing request", "method", req.Method, "path", req.URL.Path, "remote_addr", req.RemoteAddr)
 
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
 			req.Host = target.Host
 
 			originalPath := req.URL.Path // e.g., /v1/models, /v1/chat/completions
-			log.Printf("makeProxy Director: Original path for proxying: %s", originalPath)
+			logger.Debug("makeProxy Director: Original path for proxying", "path", originalPath)
 
 			// For specific paths like /v1/chat/completions, we might need to inspect/modify the body.
 			// Currently, no body modifications are performed by default.
@@ -105,14 +169,14 @@ func makeProxy(target *url.URL) *httputil.ReverseProxy {
 					// req.Body.Close() is typically handled by ReadAll on success or by the server processing the request.
 
 					if readErr != nil {
-						log.Printf("makeProxy Director: Error reading request body for %s: %v. Upstream will receive body as read before error.", originalPath, readErr)
+						logger.Error("makeProxy Director: Error reading request body", "path", originalPath, "error", readErr)
 						// bodyBytes will contain what was read before the error.
 						// Replace req.Body with what was read. ContentLength might be inaccurate if read was partial.
 						req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 						req.ContentLength = int64(len(bodyBytes))
 					} else {
-						// Body read successfully. Pass it through without modification.
-						log.Printf("makeProxy Director: Passing original request body for %s. ContentLength: %d", originalPath, len(bodyBytes))
+						// Body read successfully. Log the body before passing it through.
+						logger.Debug("makeProxy Director: Outgoing request body", "path", originalPath, "body", string(bodyBytes))
 						req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 						req.ContentLength = int64(len(bodyBytes))
 					}
@@ -127,10 +191,10 @@ func makeProxy(target *url.URL) *httputil.ReverseProxy {
 			if strings.HasPrefix(originalPath, "/v1/") {
 				suffixPath := strings.TrimPrefix(originalPath, "/v1")
 				req.URL.Path = target.Path + suffixPath
-				log.Printf("makeProxy Director: Rewriting path. Original: %s, Suffix: %s, New Target Path: %s", originalPath, suffixPath, req.URL.Path)
+				logger.Debug("makeProxy Director: Rewriting path", "original_path", originalPath, "suffix_path", suffixPath, "new_target_path", req.URL.Path)
 			} else {
 				// Should not happen if router is configured for /v1/
-				log.Printf("makeProxy Director: Path %s does not start with /v1/. Proxying as is (relative to target base).", originalPath)
+				logger.Warn("makeProxy Director: Path does not start with /v1/", "path", originalPath)
 				// This will effectively make req.URL.Path = target.Path + originalPath
 				// For example, if target.Path is /foo and originalPath is /bar, it becomes /foo/bar.
 				// If originalPath is just "bar", it becomes /foobar (if target.Path ends with /) or /foo/bar (if target.Path does not end with /)
@@ -140,29 +204,29 @@ func makeProxy(target *url.URL) *httputil.ReverseProxy {
 				req.URL.Path = target.Path + originalPath
 			}
 
-			log.Printf("makeProxy Director: Final target URL for upstream: %s", req.URL.String())
+			logger.Debug("makeProxy Director: Final target URL for upstream", "url", req.URL.String())
 
 			if tok, err := getToken(req.Context()); err == nil {
 				req.Header.Set("Authorization", "Bearer "+tok)
-				log.Printf("makeProxy Director: Authorization header set for %s", req.URL.Path)
+				logger.Debug("makeProxy Director: Authorization header set", "path", req.URL.Path)
 			} else {
-				log.Printf("Error getting token for request %s: %v. Request will proceed without Authorization.", originalPath, err)
+				logger.Error("Error getting token for request", "path", originalPath, "error", err)
 			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			log.Printf("makeProxy ModifyResponse: Received response from upstream %s for %s %s: Status=%s", resp.Request.URL.Host, resp.Request.Method, resp.Request.URL.Path, resp.Status)
+			logger.Debug("makeProxy ModifyResponse: Received response from upstream", "host", resp.Request.URL.Host, "method", resp.Request.Method, "path", resp.Request.URL.Path, "status", resp.Status)
 			var upstreamHeaders strings.Builder
 			for k, v := range resp.Header {
 				upstreamHeaders.WriteString(fmt.Sprintf("\n  %s: %s", k, strings.Join(v, ", ")))
 			}
 			if upstreamHeaders.Len() > 0 {
-				log.Printf("makeProxy ModifyResponse: Upstream response headers:%s", upstreamHeaders.String())
+				logger.Debug("makeProxy ModifyResponse: Upstream response headers", "headers", upstreamHeaders.String())
 			}
 
 			if resp.StatusCode >= 400 {
 				bodyBytes, err := io.ReadAll(resp.Body)
 				if err != nil {
-					log.Printf("makeProxy ModifyResponse: Error reading error response body from upstream: %v", err)
+					logger.Error("makeProxy ModifyResponse: Error reading error response body from upstream", "error", err)
 					// Body is already consumed or errored, replace with empty to avoid client issues.
 					resp.Body = io.NopCloser(bytes.NewBuffer(nil))
 				} else {
@@ -174,20 +238,20 @@ func makeProxy(target *url.URL) *httputil.ReverseProxy {
 					if resp.Header.Get("Content-Encoding") == "gzip" {
 						gzipReader, err := gzip.NewReader(bytes.NewReader(bodyBytes))
 						if err != nil {
-							log.Printf("makeProxy ModifyResponse: Error creating gzip reader for error response body: %v. Logging raw body.", err)
-							log.Printf("makeProxy ModifyResponse: Upstream error response body (raw gzipped): %s", string(bodyBytes))
+							logger.Error("makeProxy ModifyResponse: Error creating gzip reader for error response body", "error", err, "detail", "Logging raw body.")
+							logger.Debug("makeProxy ModifyResponse: Upstream error response body (raw gzipped)", "body", string(bodyBytes))
 						} else {
 							decompressedBodyBytes, err := io.ReadAll(gzipReader)
 							if err != nil {
-								log.Printf("makeProxy ModifyResponse: Error decompressing gzip error response body: %v. Logging raw body.", err)
-								log.Printf("makeProxy ModifyResponse: Upstream error response body (raw gzipped): %s", string(bodyBytes))
+								logger.Error("makeProxy ModifyResponse: Error decompressing gzip error response body", "error", err, "detail", "Logging raw body.")
+								logger.Debug("makeProxy ModifyResponse: Upstream error response body (raw gzipped)", "body", string(bodyBytes))
 							} else {
-								log.Printf("makeProxy ModifyResponse: Upstream error response body (decompressed): %s", string(decompressedBodyBytes))
+								logger.Debug("makeProxy ModifyResponse: Upstream error response body (decompressed)", "body", string(decompressedBodyBytes))
 							}
 							gzipReader.Close()
 						}
 					} else {
-						log.Printf("makeProxy ModifyResponse: Upstream error response body: %s", string(bodyBytes))
+						logger.Debug("makeProxy ModifyResponse: Upstream error response body", "body", string(bodyBytes))
 					}
 				}
 			}
@@ -195,7 +259,7 @@ func makeProxy(target *url.URL) *httputil.ReverseProxy {
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			// r.URL here is the *target* URL.
-			log.Printf("HTTP proxy error: Method=%s, TargetURL=%s, Error=%v", r.Method, r.URL.String(), err)
+			logger.Error("HTTP proxy error", "method", r.Method, "target_url", r.URL.String(), "error", err)
 			w.WriteHeader(http.StatusBadGateway)
 			io.WriteString(w, fmt.Sprintf("Proxy error connecting to upstream service: %v", err))
 		},
@@ -203,7 +267,7 @@ func makeProxy(target *url.URL) *httputil.ReverseProxy {
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
-	log.Printf("handleModels: Received request: Method=%s, Path=%s, RemoteAddr=%s", r.Method, r.URL.Path, r.RemoteAddr)
+	logger.Debug("handleModels: Received request", "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr)
 
 	defaultModelIDs := []string{
 		"google/gemini-2.5-pro-preview-03-25",
@@ -224,12 +288,12 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 
 		if len(customModelIDsFiltered) > 0 {
 			modelIDs = customModelIDsFiltered
-			log.Printf("handleModels: Using custom models from VERTEXAI_AVAILABLE_MODELS: %v", modelIDs)
+			logger.Info("handleModels: Using custom models from VERTEXAI_AVAILABLE_MODELS", "models", modelIDs)
 		} else {
-			log.Printf("handleModels: VERTEXAI_AVAILABLE_MODELS was set ('%s') but resulted in an empty list after parsing. Using default models: %v", availableModelsStr, modelIDs)
+			logger.Warn("handleModels: VERTEXAI_AVAILABLE_MODELS set but empty", "env_var_value", availableModelsStr, "using_default_models", modelIDs)
 		}
 	} else {
-		log.Printf("handleModels: VERTEXAI_AVAILABLE_MODELS not set or empty. Using default models: %v", modelIDs)
+		logger.Info("handleModels: VERTEXAI_AVAILABLE_MODELS not set or empty", "using_default_models", modelIDs)
 	}
 
 	currentTime := time.Now().Unix()
@@ -250,42 +314,59 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		log.Printf("Error encoding models list response: %v", err)
+		logger.Error("Error encoding models list response", "error", err)
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		return
 	}
-	log.Printf("handleModels: Successfully sent models list. Count: %d", len(responseModels))
+	logger.Info("handleModels: Successfully sent models list", "count", len(responseModels))
 }
 
 func main() {
-	log.Println("Starting proxy server...")
+	initSlogLogger() // Initialize logger first
+
+	logger.Info("Starting proxy server...")
 	location = os.Getenv("VERTEXAI_LOCATION")
 	projectID = os.Getenv("VERTEXAI_PROJECT")
 
-	log.Printf("main: Configuration - VERTEXAI_LOCATION=%s, VERTEXAI_PROJECT=%s", location, projectID)
+	logger.Info("main: Configuration", "vertexai_location", location, "vertexai_project", projectID)
 
 	if location == "" || projectID == "" {
 		log.Fatal("VERTEXAI_LOCATION and VERTEXAI_PROJECT env vars must be set")
 	}
 
-	// Construct the target URL for the general proxy.
-	// It uses the same host structure as the models API.
-	proxyHost := fmt.Sprintf(vertexAIAPIHostFormat, location)
-	baseURL := fmt.Sprintf(
-		"https://%s/v1/projects/%s/locations/%s/endpoints/openapi",
-		proxyHost, projectID, location,
-	)
+	var baseURL string
+	if location == "global" {
+		// Use the global endpoint format
+		baseURL = fmt.Sprintf(
+			"https://aiplatform.googleapis.com/v1/projects/%s/locations/global/endpoints/openapi",
+			projectID,
+		)
+	} else {
+		// Construct the target URL for regional endpoints
+		proxyHost := fmt.Sprintf(vertexAIAPIHostFormat, location)
+		baseURL = fmt.Sprintf(
+			"https://%s/v1/projects/%s/locations/%s/endpoints/openapi",
+			proxyHost, projectID, location,
+		)
+	}
+
 	target, err := url.Parse(baseURL)
 	if err != nil {
 		log.Fatalf("main: Error parsing target baseURL '%s': %v", baseURL, err)
 	}
-	log.Printf("main: Proxy target URL configured: %s", target.String())
+	logger.Info("main: Proxy target URL configured", "url", target.String())
 
 	http.HandleFunc("/v1/models", handleModels)
 	http.Handle("/v1/", makeProxy(target))
 
-	addr := ":8080"
-	log.Println("proxy listening on", addr)
+	// Get port from environment variable, default to 8080
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	addr := ":" + port
+
+	logger.Info("proxy listening", "address", addr)
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatalf("main: ListenAndServe failed: %v", err)
 	}
