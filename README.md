@@ -82,6 +82,13 @@ The proxy service is configured via environment variables:
     *   If not set or empty, defaults to: `"google/gemini-2.5-pro-preview-03-25,google/gemini-2.5-flash-preview-04-17"`.
     *   Spaces around model IDs and commas are trimmed. Empty entries resulting from multiple commas (e.g. `model1,,model2`) are ignored.
 
+*   `LOG_LEVEL`: (Optional) Sets the logging level.
+    *   Supported values: `debug`, `info`, `warn`, `error`.
+    *   Defaults to `info` if not set or invalid.
+*   `LOG_FORMAT`: (Optional) Sets the log output format.
+    *   Supported values: `text` (human-readable), `json` (structured).
+    *   Defaults to `text` if not set or invalid.
+
 The proxy listens on port `8080` within its container.
 
 ### Open WebUI Service (`docker-compose.yml`)
@@ -103,9 +110,62 @@ All models, whether default or custom, are presented with `object: "model"` and 
 
 ## Logging
 
-The proxy service logs information about incoming requests, token fetching, and upstream communication to standard output. You can view these logs using:
+The proxy service logs information about incoming requests, token fetching, and upstream communication to standard output.
+
+### Viewing Logs
+
+You can view these logs using:
 ```bash
 docker compose logs proxy
+```
+Or, if running the Go application directly:
+```bash
+go run main.go
+```
+
+### Configuring Log Output
+
+You can control the verbosity and format of the logs using environment variables:
+
+*   **`LOG_LEVEL`**:
+    *   Determines the minimum level of logs to display.
+    *   Supported values:
+        *   `debug`: Detailed information, useful for troubleshooting.
+        *   `info`: Standard operational information (default).
+        *   `warn`: Warnings about potential issues.
+        *   `error`: Error messages.
+    *   Example: To set the log level to debug:
+        ```bash
+        LOG_LEVEL=debug go run main.go
+        ```
+        Or in `docker-compose.yml` or your `.env` file:
+        ```env
+        LOG_LEVEL=debug
+        ```
+
+*   **`LOG_FORMAT`**:
+    *   Determines the output format of the logs.
+    *   Supported values:
+        *   `text`: Human-readable, plain text format (default).
+        *   `json`: Structured JSON format, suitable for log management systems.
+    *   Example: To set the log format to JSON:
+        ```bash
+        LOG_FORMAT=json go run main.go
+        ```
+        Or in `docker-compose.yml` or your `.env` file:
+        ```env
+        LOG_FORMAT=json
+        ```
+
+**Example combining both:**
+To run with debug level and JSON format:
+```bash
+LOG_LEVEL=debug LOG_FORMAT=json go run main.go
+```
+Or in your `.env` file:
+```env
+LOG_LEVEL=debug
+LOG_FORMAT=json
 ```
 
 ## Troubleshooting
