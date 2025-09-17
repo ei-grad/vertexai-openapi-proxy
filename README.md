@@ -6,9 +6,11 @@ This project provides a proxy server that translates OpenAI API requests to Goog
 
 The proxy handles:
 - Authentication with Google Cloud using Application Default Credentials (ADC).
+- Client authentication using API keys.
 - Caching of authentication tokens.
 - Serving a static list of available Vertex AI models under the `/v1/models` endpoint.
 - Proxying chat completion requests to the appropriate Vertex AI endpoint.
+- Direct Vertex AI API access via the `/vertex/*` route.
 
 It is designed to be run as a Docker container, typically orchestrated with `docker-compose` alongside an application like Open WebUI.
 
@@ -21,6 +23,7 @@ It is designed to be run as a Docker container, typically orchestrated with `doc
 3.  **Environment Variables**:
     *   `VERTEXAI_PROJECT`: Your Google Cloud Project ID.
     *   `VERTEXAI_LOCATION`: The Google Cloud region for Vertex AI (e.g., `us-central1`).
+    *   `API_KEY`: A secret key required for client authentication.
 4.  **Docker and Docker Compose**: Required to build and run the service.
 
 ## How to Run
@@ -33,6 +36,7 @@ The project includes a `docker-compose.yml` file for easy setup with Open WebUI.
     ```
     VERTEXAI_PROJECT=your-gcp-project-id
     VERTEXAI_LOCATION=us-central1
+    API_KEY=your-secret-api-key
     ```
 
 2.  **Verify ADC Path (if necessary)**:
@@ -68,6 +72,25 @@ The Go application includes unit tests.
     go test ./...
     ```
 
+### Manual Testing
+
+You can test the proxy manually using curl:
+
+1.  **Test authentication (should return 401)**:
+    ```bash
+    curl -v http://localhost:8080/v1/models
+    ```
+
+2.  **Test with valid API key**:
+    ```bash
+    curl -v -H "Authorization: Bearer your-secret-api-key" http://localhost:8080/v1/models
+    ```
+
+3.  **Test Vertex AI direct access**:
+    ```bash
+    curl -v -H "Authorization: Bearer your-secret-api-key" http://localhost:8080/vertex/v1/projects/PROJECT_ID/locations/LOCATION/publishers/google/models/gemini-pro:generateContent
+    ```
+
 ## Configuration
 
 ### Proxy Service (`main.go`)
@@ -76,6 +99,7 @@ The proxy service is configured via environment variables:
 
 *   `VERTEXAI_PROJECT`: (Required) Your Google Cloud Project ID.
 *   `VERTEXAI_LOCATION`: (Required) The Google Cloud region for Vertex AI (e.g., `us-central1`) or `global` for the global endpoint.
+*   `API_KEY`: (Required) Secret key for client authentication. Clients must include `Authorization: Bearer <API_KEY>` in request headers.
 *   `GOOGLE_APPLICATION_CREDENTIALS`: (Set within `docker-compose.yml`) Points to the path of the mounted ADC JSON file inside the container (e.g., `/app/gcp_adc.json`).
 *   `VERTEXAI_AVAILABLE_MODELS`: (Optional) A comma-separated list of model IDs to serve via the `/v1/models` endpoint.
     *   Example: `VERTEXAI_AVAILABLE_MODELS="google/gemini-1.0-pro,google/gemini-1.5-flash-preview-0514"`
@@ -176,5 +200,5 @@ LOG_FORMAT=json
     *   Ensure your ADC file is correctly mounted and `GOOGLE_APPLICATION_CREDENTIALS` inside the container points to it.
     *   Verify the Vertex AI API is enabled in your GCP project.
     *   Check that the service account associated with your ADC (or your user credentials) has the "Vertex AI User" role or equivalent permissions.
-*   **"dummy_key_for_vertex_proxy"**: This key is used by Open WebUI to satisfy its requirement for an API key. The actual authentication to Vertex AI is handled by the proxy using Google Cloud ADC.
+*   **API Key Authentication**: All requests to the proxy must include an `Authorization: Bearer <API_KEY>` header. The key must match the `API_KEY` environment variable. The proxy then handles authentication to Vertex AI using Google Cloud ADC.
 *   **Model Not Found**: Ensure the model name used in your client application (e.g., Open WebUI) matches one of the models supported by the proxy (e.g., `google/gemini-2.5-pro-preview-03-25`). The client must send the model name with the `google/` prefix if required by the Vertex AI backend, as the proxy no longer automatically prepends it.

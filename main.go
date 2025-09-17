@@ -89,6 +89,7 @@ var googleFindDefaultCredentials = google.FindDefaultCredentials
 var (
 	projectID string
 	location  string
+	apiKey    string
 	// vertexAIAPIHostFormat specifies the format for the Vertex AI API host.
 	// It's a variable to allow overriding for testing.
 	// Example: "%s-aiplatform.googleapis.com" where %s is the location.
@@ -143,6 +144,29 @@ func getToken(ctx context.Context) (string, error) {
 	expiry = tok.Expiry
 	logger.Info("getToken: Successfully fetched new token.")
 	return token, nil
+}
+
+func authenticateRequest(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			logger.Warn("authenticateRequest: Missing Authorization header", "path", r.URL.Path, "remote_addr", r.RemoteAddr)
+			w.WriteHeader(http.StatusUnauthorized)
+			io.WriteString(w, "Authorization header required")
+			return
+		}
+
+		expectedAuth := "Bearer " + apiKey
+		if authHeader != expectedAuth {
+			logger.Warn("authenticateRequest: Invalid API key", "path", r.URL.Path, "remote_addr", r.RemoteAddr)
+			w.WriteHeader(http.StatusUnauthorized)
+			io.WriteString(w, "Invalid API key")
+			return
+		}
+
+		logger.Debug("authenticateRequest: Authentication successful", "path", r.URL.Path, "remote_addr", r.RemoteAddr)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func makeProxy(target *url.URL) *httputil.ReverseProxy {
@@ -266,6 +290,88 @@ func makeProxy(target *url.URL) *httputil.ReverseProxy {
 	}
 }
 
+func makeVertexProxy(target *url.URL) *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			logger.Debug("makeVertexProxy Director: Processing request", "method", req.Method, "path", req.URL.Path, "remote_addr", req.RemoteAddr)
+
+			req.URL.Scheme = target.Scheme
+			req.URL.Host = target.Host
+			req.Host = target.Host
+
+			originalPath := req.URL.Path
+			strippedPath := strings.TrimPrefix(originalPath, "/vertex")
+
+			// Replace project and location in the path with environment variable values
+			// Expected format: /v1/projects/{project}/locations/{location}/...
+			pathParts := strings.Split(strings.TrimPrefix(strippedPath, "/"), "/")
+			if len(pathParts) >= 5 && pathParts[1] == "projects" && pathParts[3] == "locations" {
+				// Override project and location with environment variable values
+				pathParts[2] = projectID
+				pathParts[4] = location
+				req.URL.Path = "/" + strings.Join(pathParts, "/")
+				logger.Debug("makeVertexProxy Director: Overrode project and location", "original_path", originalPath, "stripped_path", strippedPath, "final_path", req.URL.Path, "project", projectID, "location", location)
+			} else {
+				req.URL.Path = strippedPath
+				logger.Debug("makeVertexProxy Director: Path doesn't match expected format, using as-is", "original_path", originalPath, "final_path", req.URL.Path)
+			}
+			logger.Debug("makeVertexProxy Director: Final target URL for upstream", "url", req.URL.String())
+
+			if tok, err := getToken(req.Context()); err == nil {
+				req.Header.Set("Authorization", "Bearer "+tok)
+				logger.Debug("makeVertexProxy Director: Authorization header set", "path", req.URL.Path)
+			} else {
+				logger.Error("Error getting token for request", "path", originalPath, "error", err)
+			}
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			logger.Debug("makeVertexProxy ModifyResponse: Received response from upstream", "host", resp.Request.URL.Host, "method", resp.Request.Method, "path", resp.Request.URL.Path, "status", resp.Status)
+			var upstreamHeaders strings.Builder
+			for k, v := range resp.Header {
+				upstreamHeaders.WriteString(fmt.Sprintf("\n  %s: %s", k, strings.Join(v, ", ")))
+			}
+			if upstreamHeaders.Len() > 0 {
+				logger.Debug("makeVertexProxy ModifyResponse: Upstream response headers", "headers", upstreamHeaders.String())
+			}
+
+			if resp.StatusCode >= 400 {
+				bodyBytes, err := io.ReadAll(resp.Body)
+				if err != nil {
+					logger.Error("makeVertexProxy ModifyResponse: Error reading error response body from upstream", "error", err)
+					resp.Body = io.NopCloser(bytes.NewBuffer(nil))
+				} else {
+					resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+					if resp.Header.Get("Content-Encoding") == "gzip" {
+						gzipReader, err := gzip.NewReader(bytes.NewReader(bodyBytes))
+						if err != nil {
+							logger.Error("makeVertexProxy ModifyResponse: Error creating gzip reader for error response body", "error", err, "detail", "Logging raw body.")
+							logger.Debug("makeVertexProxy ModifyResponse: Upstream error response body (raw gzipped)", "body", string(bodyBytes))
+						} else {
+							decompressedBodyBytes, err := io.ReadAll(gzipReader)
+							if err != nil {
+								logger.Error("makeVertexProxy ModifyResponse: Error decompressing gzip error response body", "error", err, "detail", "Logging raw body.")
+								logger.Debug("makeVertexProxy ModifyResponse: Upstream error response body (raw gzipped)", "body", string(bodyBytes))
+							} else {
+								logger.Debug("makeVertexProxy ModifyResponse: Upstream error response body (decompressed)", "body", string(decompressedBodyBytes))
+							}
+							gzipReader.Close()
+						}
+					} else {
+						logger.Debug("makeVertexProxy ModifyResponse: Upstream error response body", "body", string(bodyBytes))
+					}
+				}
+			}
+			return nil
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			logger.Error("HTTP proxy error", "method", r.Method, "target_url", r.URL.String(), "error", err)
+			w.WriteHeader(http.StatusBadGateway)
+			io.WriteString(w, fmt.Sprintf("Proxy error connecting to upstream service: %v", err))
+		},
+	}
+}
+
 func handleModels(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("handleModels: Received request", "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr)
 
@@ -288,12 +394,12 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 
 		if len(customModelIDsFiltered) > 0 {
 			modelIDs = customModelIDsFiltered
-			logger.Info("handleModels: Using custom models from VERTEXAI_AVAILABLE_MODELS", "models", modelIDs)
+			logger.Debug("handleModels: Using custom models from VERTEXAI_AVAILABLE_MODELS", "models", modelIDs)
 		} else {
 			logger.Warn("handleModels: VERTEXAI_AVAILABLE_MODELS set but empty", "env_var_value", availableModelsStr, "using_default_models", modelIDs)
 		}
 	} else {
-		logger.Info("handleModels: VERTEXAI_AVAILABLE_MODELS not set or empty", "using_default_models", modelIDs)
+		logger.Debug("handleModels: VERTEXAI_AVAILABLE_MODELS not set or empty", "using_default_models", modelIDs)
 	}
 
 	currentTime := time.Now().Unix()
@@ -318,7 +424,7 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		return
 	}
-	logger.Info("handleModels: Successfully sent models list", "count", len(responseModels))
+	logger.Debug("handleModels: Successfully sent models list", "count", len(responseModels))
 }
 
 func main() {
@@ -327,11 +433,16 @@ func main() {
 	logger.Info("Starting proxy server...")
 	location = os.Getenv("VERTEXAI_LOCATION")
 	projectID = os.Getenv("VERTEXAI_PROJECT")
+	apiKey = os.Getenv("API_KEY")
 
 	logger.Info("main: Configuration", "vertexai_location", location, "vertexai_project", projectID)
 
 	if location == "" || projectID == "" {
 		log.Fatal("VERTEXAI_LOCATION and VERTEXAI_PROJECT env vars must be set")
+	}
+
+	if apiKey == "" {
+		log.Fatal("API_KEY env var must be set")
 	}
 
 	var baseURL string
@@ -356,8 +467,22 @@ func main() {
 	}
 	logger.Info("main: Proxy target URL configured", "url", target.String())
 
-	http.HandleFunc("/v1/models", handleModels)
-	http.Handle("/v1/", makeProxy(target))
+	var vertexProxyHost string
+	if location == "global" {
+		vertexProxyHost = "aiplatform.googleapis.com"
+	} else {
+		vertexProxyHost = fmt.Sprintf(vertexAIAPIHostFormat, location)
+	}
+
+	vertexTarget, err := url.Parse("https://" + vertexProxyHost)
+	if err != nil {
+		log.Fatalf("main: Error parsing vertex target host '%s': %v", vertexProxyHost, err)
+	}
+	logger.Info("main: Vertex proxy target URL configured", "url", vertexTarget.String())
+
+	http.Handle("/v1/models", authenticateRequest(http.HandlerFunc(handleModels)))
+	http.Handle("/vertex/", authenticateRequest(makeVertexProxy(vertexTarget)))
+	http.Handle("/v1/", authenticateRequest(makeProxy(target)))
 
 	// Get port from environment variable, default to 8080
 	port := os.Getenv("PORT")
